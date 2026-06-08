@@ -2033,8 +2033,7 @@ export default function App() {
         } else {
           await setDoc(ref, { photoURL:u.photoURL||"" }, {merge:true});
         }
-        const data = snap.exists() ? snap.data() : {};
-        setIsAdmin(data.isAdmin===true||u.email==="juancruzheredia96@gmail.com");
+        setIsAdmin(u.email==="juancruzheredia96@gmail.com" || (snap.exists() && snap.data().isAdmin===true));
       }
     });
   }, []);
