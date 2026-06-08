@@ -249,7 +249,7 @@ function LoginScreen() {
       background:MARFIL_LIGHT, gap:24 }}>
       <div style={{ fontSize:56 }}>⚽</div>
       <div style={{ textAlign:"center" }}>
-        <div style={{ fontSize:22, fontWeight:700, color:BORDO }}>Prode Mundial 2026</div>
+        <div style={{ fontSize:22, fontWeight:700, color:BORDO }}>Prode Familiar</div>
         
       </div>
       <button onClick={handleLogin} disabled={loading} style={{
@@ -2062,7 +2062,7 @@ export default function App() {
           display:"flex", alignItems:"center", gap:10 }}>
           
           <div style={{ display:"flex", flexDirection:"column", justifyContent:"center", gap:3 }}>
-            <div style={{ color:MARFIL, fontSize:15, fontWeight:600 }}>Prode Mundial 2026</div>
+            <div style={{ color:MARFIL, fontSize:15, fontWeight:600 }}>Prode Familiar</div>
             
           </div>
           <div onClick={()=>setActiveTab("perfil")} style={{ marginLeft:"auto", width:32, height:32,
