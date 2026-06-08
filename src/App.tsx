@@ -1927,7 +1927,7 @@ function TabPerfil({ user, onLogout, isAdmin }: { user:any, onLogout:()=>void, i
         {editingNick ? (
           <div style={{ display:"flex", gap:8, width:"100%" }}>
             <input value={nick} onChange={e=>setNick(e.target.value)} style={{ flex:1, ...inputStyle() }} />
-            <button onClick={saveNick} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:"0 14px", fontSize:13, fontWeight:600 }}>OK</button>
+            <button onMouseDown={e => { e.preventDefault(); saveNick(); }} style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:6, padding:"0 14px", fontSize:13, fontWeight:600 }}>OK</button>
           </div>
         ) : (
           <div onClick={()=>setEditingNick(true)} style={{ fontSize:18, fontWeight:600, color:BORDO, cursor:"pointer" }}>
@@ -2033,7 +2033,8 @@ export default function App() {
         } else {
           await setDoc(ref, { photoURL:u.photoURL||"" }, {merge:true});
         }
-        setIsAdmin(u.email==="juancruzheredia96@gmail.com" || (snap.exists() && snap.data().isAdmin===true));
+        const data = snap.exists() ? snap.data() : {};
+        setIsAdmin(u.email==="juancruzheredia96@gmail.com" || data.isAdmin===true);
       }
     });
   }, []);
