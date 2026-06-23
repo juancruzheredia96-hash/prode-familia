@@ -940,13 +940,16 @@ function TabTendencias() {
 
     const valores = [votos.local, votos.empate, votos.visita].sort((a,b) => b-a);
     const pctMax = Math.round(valores[0]/total*100);
-    const pctTopDos = Math.round((valores[0]+valores[1])/total*100);
+    const pct2do = Math.round(valores[1]/total*100);
+    const pctTopDos = pctMax + pct2do;
+    const diffTopDos = pctMax - pct2do;
 
     // Consenso claro: una sola opción domina con 80%+
     if (pctMax >= 80) return { label:"Consenso", sub:"El grupo lo tiene clarísimo", icon:"✅", bg:"#e8f5e9", color:"#2e7d32" };
 
-    // Picante: nadie supera 35% solo, O dos opciones enfrentadas suman 80%+ (dos bandos parejos)
-    if (pctMax < 35 || (pctTopDos >= 80 && pctMax < 80)) {
+    // Picante: nadie supera 35% solo (dispersión total), O dos opciones parejas (diff<=10pp) suman 80%+ (dos bandos reales)
+    const dosBandos = diffTopDos <= 10 && pctTopDos >= 80;
+    if (pctMax < 35 || dosBandos) {
       return { label:"¡Picante!", sub:"Cada uno en su propio mundo", icon:"🌶️", bg:"#fce4ec", color:"#c62828" };
     }
 
@@ -1742,6 +1745,55 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     setGuardandoLock(false);
   }
 
+  const [recalculando, setRecalculando] = useState(false);
+  const [recalculoMsg, setRecalculoMsg] = useState("");
+
+  async function recalcularAciertoHistorico() {
+    setRecalculando(true);
+    setRecalculoMsg("");
+    try {
+      // Mapa de partidos con resultado real (gL/gV), para no buscarlo partido por partido
+      const partidosSnap = await getDocs(collection(db, "partidos"));
+      const partidosMap: Record<string, { gL:number, gV:number }> = {};
+      partidosSnap.docs.forEach(d => {
+        const p = d.data();
+        if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
+          partidosMap[d.id] = { gL: p.gL, gV: p.gV };
+        }
+      });
+
+      // Solo pronosticos ya calculados (partidos jugados y procesados)
+      const pronosSnap = await getDocs(query(collection(db, "pronosticos"), where("calculado", "==", true)));
+      const acumulado: Record<string, { acertados:number, totales:number }> = {};
+      pronosSnap.docs.forEach(d => {
+        const { userId, matchId, mL, mV } = d.data();
+        const real = partidosMap[matchId];
+        if (!real || mL === null || mV === null || mL === undefined || mV === undefined) return;
+        if (!acumulado[userId]) acumulado[userId] = { acertados:0, totales:0 };
+        acumulado[userId].totales += 2;
+        if (mL === real.gL) acumulado[userId].acertados++;
+        if (mV === real.gV) acumulado[userId].acertados++;
+      });
+
+      // Reseteo total de usuarios primero (por si alguno quedo sin pronosticos validos, queda en 0 limpio)
+      const usuariosSnap = await getDocs(collection(db, "usuarios"));
+      await Promise.all(usuariosSnap.docs.map(d => {
+        const datos = acumulado[d.id] || { acertados:0, totales:0 };
+        const acierto = datos.totales > 0 ? Math.round((datos.acertados/datos.totales)*100) : 0;
+        return setDoc(d.ref, {
+          golesAcertados: datos.acertados,
+          golesPronosticados: datos.totales,
+          acierto,
+        }, { merge:true });
+      }));
+
+      setRecalculoMsg(`✓ Recalculado para ${usuariosSnap.docs.length} jugadores`);
+    } catch (e) {
+      setRecalculoMsg("✗ Error al recalcular, probá de nuevo");
+    }
+    setRecalculando(false);
+  }
+
   useEffect(() => {
     const q = query(collection(db,"partidos"), orderBy("fecha"), orderBy("hora"));
     return onSnapshot(q, snap => setPartidos(snap.docs.map(d=>({id:d.id,...d.data()}))));
@@ -1939,6 +1991,26 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
             </div>
             {lockHoras === lockHorasGuardado && (
               <div style={{ padding:"0 14px 10px", fontSize:10, color:VERDE }}>✓ Guardado, aplica a todos los partidos</div>
+            )}
+          </div>
+
+          <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", marginBottom:10 }}>
+            <div style={{ background:BORDO_DARK, padding:"8px 12px" }}><span style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>🎯 Estadísticas</span></div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 14px" }}>
+              <span style={{ fontSize:16 }}>📊</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:500 }}>% de acierto de goles</div>
+                <div style={{ fontSize:10, color:"#888" }}>Recalcula con todos los partidos jugados hasta ahora</div>
+              </div>
+              <button onClick={recalcularAciertoHistorico} disabled={recalculando}
+                style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:5,
+                  padding:"6px 10px", fontSize:11, fontWeight:600, cursor:"pointer",
+                  opacity:recalculando?0.6:1, whiteSpace:"nowrap" }}>
+                {recalculando ? "Calculando..." : "Recalcular"}
+              </button>
+            </div>
+            {recalculoMsg && (
+              <div style={{ padding:"0 14px 10px", fontSize:10, color:recalculoMsg.startsWith("✓")?VERDE:ROJO }}>{recalculoMsg}</div>
             )}
           </div>
 
