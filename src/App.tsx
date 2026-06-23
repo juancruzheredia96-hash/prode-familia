@@ -618,8 +618,8 @@ function TabTabla({ onSelectUser }: { onSelectUser: (uid: string) => void }) {
   const scrollAreaWidth = Math.max(cardWidth - FIXED_COL_WIDTH, 100); // lo que le queda al area scrolleable
 
   return (
-    <div style={{ padding:PADDING, background:MARFIL_LIGHT, flex:1, width:viewportWidth, boxSizing:"border-box", overflow:"hidden" }}>
-      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", width:cardWidth }}>
+    <div style={{ padding:PADDING, background:MARFIL_LIGHT, flex:1, width:viewportWidth, boxSizing:"border-box", overflowX:"hidden" }}>
+      <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflowX:"hidden", width:cardWidth }}>
         <div style={{ background:BORDO, padding:"10px 12px" }}>
           <div style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>Tabla de posiciones</div>
           <div style={{ color:MARFIL_DARK, fontSize:10, marginTop:2 }}>{fecha}</div>
@@ -632,7 +632,7 @@ function TabTabla({ onSelectUser }: { onSelectUser: (uid: string) => void }) {
         )}
 
         {jugadores.length > 0 && (
-          <div style={{ display:"flex", width:cardWidth, overflow:"hidden" }}>
+          <div style={{ display:"flex", width:cardWidth, overflowX:"hidden" }}>
             {/* Columnas fijas: #, foto, jugador */}
             <div style={{ flexShrink:0, width:FIXED_COL_WIDTH, background:"white",
               boxShadow:"2px 0 4px rgba(0,0,0,0.06)", zIndex:2 }}>
