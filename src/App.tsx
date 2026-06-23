@@ -259,7 +259,7 @@ async function calcularPuntosPartido(matchId: string, gL: number, gV: number) {
     const esExacto = pts === 3;
     const rachaActual = esExacto ? (ud.rachaActual || 0) + 1 : 0;
     const rachaMasLarga = Math.max(ud.rachaMasLarga || 0, rachaActual);
-    const ceroRacha = (tienePronostico && pts === 0) ? (ud.ceroRacha || 0) + 1 : ud.ceroRacha || 0;
+    const ceroRacha = pts === 0 ? (ud.ceroRacha || 0) + 1 : ud.ceroRacha || 0;
 
     // Acierto de goles: de los 2 marcadores pronosticados (local y visitante), cuantos coincidieron exacto
     const golesAciertaL = tienePronostico && mL === gL ? 1 : 0;
@@ -1807,24 +1807,21 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     setRecalculando(true);
     setRecalculoMsg("");
     try {
-      // Mapa de partidos con resultado real (gL/gV), para no buscarlo partido por partido
-      const partidosSnap = await getDocs(collection(db, "partidos"));
-      const partidosMap: Record<string, { gL:number, gV:number }> = {};
+      const partidosSnap = await getDocs(query(collection(db, "partidos"), orderBy("fecha"), orderBy("hora")));
+      const partidosOrdenados: { id:string, gL:number, gV:number }[] = [];
       partidosSnap.docs.forEach(d => {
         const p = d.data();
         if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
-          partidosMap[d.id] = { gL: p.gL, gV: p.gV };
+          partidosOrdenados.push({ id: d.id, gL: p.gL, gV: p.gV });
         }
       });
-      const totalPartidosConResultado = Object.keys(partidosMap).length;
+      const totalPartidosConResultado = partidosOrdenados.length;
 
-      // Pronosticos validos por usuario (matchId -> {mL,mV}) para saber que pronostico cada uno
       const pronosSnap = await getDocs(collection(db, "pronosticos"));
       const pronosPorUsuario: Record<string, Record<string, {mL:number, mV:number}>> = {};
       pronosSnap.docs.forEach(d => {
         const { userId, matchId, mL, mV } = d.data();
         if (mL === null || mV === null || mL === undefined || mV === undefined) return;
-        if (!partidosMap[matchId]) return; // solo partidos ya jugados
         if (!pronosPorUsuario[userId]) pronosPorUsuario[userId] = {};
         pronosPorUsuario[userId][matchId] = { mL, mV };
       });
@@ -1833,16 +1830,23 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
       await Promise.all(usuariosSnap.docs.map(d => {
         const misPronos = pronosPorUsuario[d.id] || {};
         let golesAcertados = 0, golesPronosticados = 0, exactos = 0, aciertosResultado = 0;
+        let rachaActual = 0, rachaMasLarga = 0, ceroRacha = 0;
 
-        Object.entries(partidosMap).forEach(([matchId, real]) => {
-          const prono = misPronos[matchId];
-          if (!prono) return; // no pronostico este partido: cuenta en el denominador global, pero no suma aca
-          golesPronosticados += 2;
-          if (prono.mL === real.gL) golesAcertados++;
-          if (prono.mV === real.gV) golesAcertados++;
-          const pts = calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0;
-          if (pts === 3) exactos++;
-          if (pts >= 1) aciertosResultado++;
+        // Recorre en orden cronologico para que las rachas (consecutivos) sean correctas
+        partidosOrdenados.forEach(real => {
+          const prono = misPronos[real.id];
+          const tienePronostico = !!prono;
+          const pts = tienePronostico ? (calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0) : 0;
+
+          if (tienePronostico) {
+            golesPronosticados += 2;
+            if (prono.mL === real.gL) golesAcertados++;
+            if (prono.mV === real.gV) golesAcertados++;
+            if (pts >= 1) aciertosResultado++;
+          }
+          if (pts === 3) { exactos++; rachaActual++; } else { rachaActual = 0; }
+          rachaMasLarga = Math.max(rachaMasLarga, rachaActual);
+          ceroRacha = pts === 0 ? ceroRacha + 1 : 0;
         });
 
         const acierto = golesPronosticados > 0 ? Math.round((golesAcertados/golesPronosticados)*100) : 0;
@@ -1853,6 +1857,7 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
           golesAcertados, golesPronosticados, acierto,
           partidosConResultado: totalPartidosConResultado,
           aciertosResultado, pctExactos, pctAciertoResultado,
+          rachaActual, rachaMasLarga, ceroRacha,
         }, { merge:true });
       }));
 
