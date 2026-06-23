@@ -206,38 +206,62 @@ async function calcularPuntosPredicciones(resultados: Record<string,string>) {
 async function calcularPuntosPartido(matchId: string, gL: number, gV: number) {
   const pronosSnap = await getDocs(collection(db, "pronosticos"));
   const delPartido = pronosSnap.docs.filter(d => d.data().matchId === matchId);
+  const pronosticoPorUsuario: Record<string, any> = {};
   for (const pDoc of delPartido) {
-    const { userId, mL, mV } = pDoc.data();
-    if (mL === null || mV === null) continue;
-    const pts = calcPtsNuevo(gL, gV, mL, mV) ?? 0;
-    const userRef = doc(db, "usuarios", userId);
-    const userSnap = await getDoc(userRef);
-    if (!userSnap.exists()) continue;
-    const ud = userSnap.data();
+    const data = pDoc.data();
+    pronosticoPorUsuario[data.userId] = { ref: pDoc.ref, ...data };
+  }
+
+  // Este partido cuenta para el denominador de TODOS los usuarios registrados,
+  // hayan pronosticado o no (si no pronosticaron, no suman al numerador de ninguna metrica).
+  const usuariosSnap = await getDocs(collection(db, "usuarios"));
+
+  for (const userDoc of usuariosSnap.docs) {
+    const userId = userDoc.id;
+    const ud = userDoc.data();
+    const pronostico = pronosticoPorUsuario[userId];
+    const mL = pronostico?.mL ?? null;
+    const mV = pronostico?.mV ?? null;
+    const tienePronostico = mL !== null && mV !== null;
+
+    const pts = tienePronostico ? (calcPtsNuevo(gL, gV, mL, mV) ?? 0) : 0;
     const esExacto = pts === 3;
     const rachaActual = esExacto ? (ud.rachaActual || 0) + 1 : 0;
     const rachaMasLarga = Math.max(ud.rachaMasLarga || 0, rachaActual);
-    const ceroRacha = pts === 0 ? (ud.ceroRacha || 0) + 1 : 0;
+    const ceroRacha = (tienePronostico && pts === 0) ? (ud.ceroRacha || 0) + 1 : ud.ceroRacha || 0;
+
     // Acierto de goles: de los 2 marcadores pronosticados (local y visitante), cuantos coincidieron exacto
-    const golesAciertaL = mL === gL ? 1 : 0;
-    const golesAciertaV = mV === gV ? 1 : 0;
+    const golesAciertaL = tienePronostico && mL === gL ? 1 : 0;
+    const golesAciertaV = tienePronostico && mV === gV ? 1 : 0;
     const golesAcertados = (ud.golesAcertados || 0) + golesAciertaL + golesAciertaV;
     const golesPronosticados = (ud.golesPronosticados || 0) + 2;
     const acierto = golesPronosticados > 0 ? Math.round((golesAcertados / golesPronosticados) * 100) : 0;
-    await setDoc(userRef, {
+
+    // % resultados exactos y % acierto resultado: sobre el TOTAL de partidos con resultado (haya pronosticado o no)
+    const partidosConResultado = (ud.partidosConResultado || 0) + 1;
+    const exactos = esExacto ? (ud.exactos || 0) + 1 : (ud.exactos || 0);
+    const aciertosResultado = (tienePronostico && pts >= 1) ? (ud.aciertosResultado || 0) + 1 : (ud.aciertosResultado || 0);
+    const pctExactos = Math.round((exactos / partidosConResultado) * 100);
+    const pctAciertoResultado = Math.round((aciertosResultado / partidosConResultado) * 100);
+
+    await setDoc(userDoc.ref, {
       pts: (ud.pts || 0) + pts,
       hoy: (ud.hoy || 0) + pts,
-      exactos: esExacto ? (ud.exactos || 0) + 1 : (ud.exactos || 0),
-      rachaActual, rachaMasLarga, ceroRacha,
+      exactos, rachaActual, rachaMasLarga, ceroRacha,
       golesAcertados, golesPronosticados, acierto,
+      partidosConResultado, aciertosResultado, pctExactos, pctAciertoResultado,
     }, { merge: true });
-    await setDoc(pDoc.ref, { pts, calculado: true }, { merge: true });
+
+    if (pronostico) {
+      await setDoc(pronostico.ref, { pts, calculado: true }, { merge: true });
+    }
   }
-  const usuariosSnap = await getDocs(query(collection(db, "usuarios"), orderBy("pts", "desc")));
-  await Promise.all(usuariosSnap.docs.map((d, idx) =>
+
+  const usuariosOrdenSnap = await getDocs(query(collection(db, "usuarios"), orderBy("pts", "desc")));
+  await Promise.all(usuariosOrdenSnap.docs.map((d, idx) =>
     setDoc(d.ref, { pos: idx + 1, mov: (d.data().posAnterior || idx + 1) - (idx + 1) }, { merge: true })
   ));
-  await Promise.all(usuariosSnap.docs.map((d, idx) =>
+  await Promise.all(usuariosOrdenSnap.docs.map((d, idx) =>
     setDoc(d.ref, { posAnterior: idx + 1 }, { merge: true })
   ));
 }
@@ -1761,29 +1785,43 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
           partidosMap[d.id] = { gL: p.gL, gV: p.gV };
         }
       });
+      const totalPartidosConResultado = Object.keys(partidosMap).length;
 
-      // Solo pronosticos ya calculados (partidos jugados y procesados)
-      const pronosSnap = await getDocs(query(collection(db, "pronosticos"), where("calculado", "==", true)));
-      const acumulado: Record<string, { acertados:number, totales:number }> = {};
+      // Pronosticos validos por usuario (matchId -> {mL,mV}) para saber que pronostico cada uno
+      const pronosSnap = await getDocs(collection(db, "pronosticos"));
+      const pronosPorUsuario: Record<string, Record<string, {mL:number, mV:number}>> = {};
       pronosSnap.docs.forEach(d => {
         const { userId, matchId, mL, mV } = d.data();
-        const real = partidosMap[matchId];
-        if (!real || mL === null || mV === null || mL === undefined || mV === undefined) return;
-        if (!acumulado[userId]) acumulado[userId] = { acertados:0, totales:0 };
-        acumulado[userId].totales += 2;
-        if (mL === real.gL) acumulado[userId].acertados++;
-        if (mV === real.gV) acumulado[userId].acertados++;
+        if (mL === null || mV === null || mL === undefined || mV === undefined) return;
+        if (!partidosMap[matchId]) return; // solo partidos ya jugados
+        if (!pronosPorUsuario[userId]) pronosPorUsuario[userId] = {};
+        pronosPorUsuario[userId][matchId] = { mL, mV };
       });
 
-      // Reseteo total de usuarios primero (por si alguno quedo sin pronosticos validos, queda en 0 limpio)
       const usuariosSnap = await getDocs(collection(db, "usuarios"));
       await Promise.all(usuariosSnap.docs.map(d => {
-        const datos = acumulado[d.id] || { acertados:0, totales:0 };
-        const acierto = datos.totales > 0 ? Math.round((datos.acertados/datos.totales)*100) : 0;
+        const misPronos = pronosPorUsuario[d.id] || {};
+        let golesAcertados = 0, golesPronosticados = 0, exactos = 0, aciertosResultado = 0;
+
+        Object.entries(partidosMap).forEach(([matchId, real]) => {
+          const prono = misPronos[matchId];
+          if (!prono) return; // no pronostico este partido: cuenta en el denominador global, pero no suma aca
+          golesPronosticados += 2;
+          if (prono.mL === real.gL) golesAcertados++;
+          if (prono.mV === real.gV) golesAcertados++;
+          const pts = calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0;
+          if (pts === 3) exactos++;
+          if (pts >= 1) aciertosResultado++;
+        });
+
+        const acierto = golesPronosticados > 0 ? Math.round((golesAcertados/golesPronosticados)*100) : 0;
+        const pctExactos = totalPartidosConResultado > 0 ? Math.round((exactos/totalPartidosConResultado)*100) : 0;
+        const pctAciertoResultado = totalPartidosConResultado > 0 ? Math.round((aciertosResultado/totalPartidosConResultado)*100) : 0;
+
         return setDoc(d.ref, {
-          golesAcertados: datos.acertados,
-          golesPronosticados: datos.totales,
-          acierto,
+          golesAcertados, golesPronosticados, acierto,
+          partidosConResultado: totalPartidosConResultado,
+          aciertosResultado, pctExactos, pctAciertoResultado,
         }, { merge:true });
       }));
 
@@ -1829,7 +1867,7 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     setLoading(true);
     const snap = await getDocs(collection(db, "usuarios"));
     for (const d of snap.docs) {
-      await setDoc(d.ref, { pts:0, hoy:0, mov:0, rachaActual:0, rachaMasLarga:0, exactos:0, acierto:0, golesAcertados:0, golesPronosticados:0, ceroRacha:0, pos:0 }, { merge:true });
+      await setDoc(d.ref, { pts:0, hoy:0, mov:0, rachaActual:0, rachaMasLarga:0, exactos:0, acierto:0, golesAcertados:0, golesPronosticados:0, ceroRacha:0, partidosConResultado:0, aciertosResultado:0, pctExactos:0, pctAciertoResultado:0, pos:0 }, { merge:true });
     }
     setConfirmReinicio(false);
     setMsg("✓ Puntuación reiniciada para todos.");
@@ -1999,8 +2037,8 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
             <div style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 14px" }}>
               <span style={{ fontSize:16 }}>📊</span>
               <div style={{ flex:1 }}>
-                <div style={{ fontSize:12, fontWeight:500 }}>% de acierto de goles</div>
-                <div style={{ fontSize:10, color:"#888" }}>Recalcula con todos los partidos jugados hasta ahora</div>
+                <div style={{ fontSize:12, fontWeight:500 }}>Estadísticas de acierto</div>
+                <div style={{ fontSize:10, color:"#888" }}>Recalcula % goles, % exactos y % acierto con todo lo jugado</div>
               </div>
               <button onClick={recalcularAciertoHistorico} disabled={recalculando}
                 style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:5,
@@ -2239,6 +2277,8 @@ function PerfilAjeno({ uid, onBack }: { uid: string, onBack: ()=>void }) {
                 { val:userData.pos?`${userData.pos}°`:"—", lbl:"Posición actual" },
                 { val:userData.exactos||0, lbl:"Resultados exactos" },
                 { val:userData.acierto?`${userData.acierto}%`:"0%", lbl:"Acierto de goles" },
+                { val:userData.pctExactos?`${userData.pctExactos}%`:"0%", lbl:"% resultados exactos" },
+                { val:userData.pctAciertoResultado?`${userData.pctAciertoResultado}%`:"0%", lbl:"% acierto resultado" },
               ].map(s=>(
                 <div key={s.lbl} style={{ background:MARFIL_LIGHT, borderRadius:8, padding:10,
                   textAlign:"center", border:"0.5px solid #e0ddd5" }}>
@@ -2327,6 +2367,8 @@ function TabPerfil({ user, onLogout, isAdmin }: { user:any, onLogout:()=>void, i
             { val:userData?.pos?`${userData.pos}°`:"—", lbl:"Posición actual" },
             { val:userData?.exactos||0, lbl:"Resultados exactos" },
             { val:userData?.acierto?`${userData.acierto}%`:"0%", lbl:"Acierto de goles" },
+            { val:userData?.pctExactos?`${userData.pctExactos}%`:"0%", lbl:"% resultados exactos" },
+            { val:userData?.pctAciertoResultado?`${userData.pctAciertoResultado}%`:"0%", lbl:"% acierto resultado" },
           ].map(s=>(
             <div key={s.lbl} style={{ background:MARFIL_LIGHT, borderRadius:8, padding:10,
               textAlign:"center", border:"0.5px solid #e0ddd5" }}>
@@ -2408,7 +2450,7 @@ export default function App() {
             ini: (u.displayName||"U").slice(0,2).toUpperCase(),
             email: u.email, photoURL: u.photoURL||"",
             pts:0, hoy:0, mov:0, rachaActual:0, rachaMasLarga:0,
-            exactos:0, acierto:0, golesAcertados:0, golesPronosticados:0, ceroRacha:0, createdAt:serverTimestamp()
+            exactos:0, acierto:0, golesAcertados:0, golesPronosticados:0, ceroRacha:0, partidosConResultado:0, aciertosResultado:0, pctExactos:0, pctAciertoResultado:0, createdAt:serverTimestamp()
           });
         } else {
           await setDoc(ref, { photoURL:u.photoURL||"" }, {merge:true});
