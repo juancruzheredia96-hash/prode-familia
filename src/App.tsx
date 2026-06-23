@@ -109,6 +109,37 @@ function horaART() {
   });
 }
 
+// Redimensiona una imagen a un cuadrado de `tamano`px, recortando el centro,
+// y la devuelve como Base64 JPEG comprimido. Pensado para fotos de perfil chicas
+// que entren cómodas en un documento de Firestore (limite 1MB).
+function comprimirImagenAFoto(file: File, tamano = 200, calidad = 0.7): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("No se pudo procesar la imagen"));
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = tamano;
+        canvas.height = tamano;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) { reject(new Error("Canvas no disponible")); return; }
+
+        // Recorte centrado cuadrado (cover), igual que object-fit:cover
+        const lado = Math.min(img.width, img.height);
+        const sx = (img.width - lado) / 2;
+        const sy = (img.height - lado) / 2;
+        ctx.drawImage(img, sx, sy, lado, lado, 0, 0, tamano, tamano);
+
+        resolve(canvas.toDataURL("image/jpeg", calidad));
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function estaBloquado(fecha: string, hora: string, horasAntes: number): boolean {
   if (!fecha || !hora) return false;
   const [h, m] = hora.split(":").map(Number);
@@ -623,8 +654,8 @@ function TabTabla({ onSelectUser }: { onSelectUser: (uid: string) => void }) {
                       <div style={{ width:30, height:30, borderRadius:"50%", border:`1.5px solid ${BORDO}`,
                         overflow:"hidden", background:MARFIL, position:"relative", zIndex:1,
                         display:"flex", alignItems:"center", justifyContent:"center" }}>
-                        {j.photoURL
-                          ? <img src={j.photoURL} alt={j.nick} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                        {(j.fotoPersonalizada || j.photoURL)
+                          ? <img src={j.fotoPersonalizada || j.photoURL} alt={j.nick} style={{ width:"100%", height:"100%", objectFit:"cover" }} />
                           : <span style={{ fontSize:11, fontWeight:500, color:BORDO }}>{(j.ini||"?").slice(0,2)}</span>
                         }
                       </div>
@@ -2247,8 +2278,8 @@ function PerfilAjeno({ uid, onBack }: { uid: string, onBack: ()=>void }) {
             <div style={{ position:"relative", width:72, height:72, flexShrink:0 }}>
               <div style={{ width:72, height:72, borderRadius:"50%", background:MARFIL,
                 border:`3px solid ${BORDO}`, overflow:"hidden", flexShrink:0, position:"relative", zIndex:1 }}>
-                {userData.photoURL
-                  ? <img src={userData.photoURL} alt="Foto" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+                {(userData.fotoPersonalizada || userData.photoURL)
+                  ? <img src={userData.fotoPersonalizada || userData.photoURL} alt="Foto" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
                   : <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center",
                       justifyContent:"center", fontSize:26, fontWeight:600, color:BORDO }}>{ini}</div>
                 }
@@ -2301,7 +2332,35 @@ function TabPerfil({ user, onLogout, isAdmin }: { user:any, onLogout:()=>void, i
   const [nick, setNick] = useState("");
   const [editingNick, setEditingNick] = useState(false);
   const [userData, setUserData] = useState<any>(null);
+  const [subiendoFoto, setSubiendoFoto] = useState(false);
+  const [errorFoto, setErrorFoto] = useState("");
   const ini = (nick||"U").slice(0,2).toUpperCase();
+  const fotoMostrada = userData?.fotoPersonalizada || user?.photoURL || "";
+
+  async function manejarCambioFoto(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // permite re-seleccionar el mismo archivo despues
+    if (!file || !user) return;
+    if (!file.type.startsWith("image/")) {
+      setErrorFoto("Elegí un archivo de imagen");
+      return;
+    }
+    setErrorFoto("");
+    setSubiendoFoto(true);
+    try {
+      const base64 = await comprimirImagenAFoto(file, 200, 0.7);
+      // Limite de seguridad bien por debajo del 1MB de Firestore
+      if (base64.length > 700_000) {
+        setErrorFoto("La imagen quedó muy pesada, probá con otra foto");
+        setSubiendoFoto(false);
+        return;
+      }
+      await setDoc(doc(db, "usuarios", user.uid), { fotoPersonalizada: base64 }, { merge: true });
+    } catch (err) {
+      setErrorFoto("No se pudo procesar la imagen, probá de nuevo");
+    }
+    setSubiendoFoto(false);
+  }
 
   useEffect(() => {
     if (!user) return;
@@ -2327,14 +2386,28 @@ function TabPerfil({ user, onLogout, isAdmin }: { user:any, onLogout:()=>void, i
         <div style={{ position:"relative", width:72, height:72, flexShrink:0 }}>
           <div style={{ width:72, height:72, borderRadius:"50%", background:MARFIL,
             border:`3px solid ${BORDO}`, overflow:"hidden", flexShrink:0, position:"relative", zIndex:1 }}>
-            {user?.photoURL
-              ? <img src={user.photoURL} alt="Foto" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+            {fotoMostrada
+              ? <img src={fotoMostrada} alt="Foto" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
               : <div style={{ width:"100%", height:"100%", display:"flex", alignItems:"center",
                   justifyContent:"center", fontSize:26, fontWeight:600, color:BORDO }}>{ini}</div>
             }
+            {subiendoFoto && (
+              <div style={{ position:"absolute", inset:0, background:"rgba(255,255,255,0.7)",
+                display:"flex", alignItems:"center", justifyContent:"center", fontSize:11, color:BORDO, fontWeight:600 }}>
+                ...
+              </div>
+            )}
           </div>
           <RachaOverlay tipo={tipoRacha(userData)} size={72} />
+          <label style={{ position:"absolute", bottom:-2, right:-2, width:26, height:26, borderRadius:"50%",
+            background:BORDO, border:"2px solid white", display:"flex", alignItems:"center", justifyContent:"center",
+            cursor:"pointer", zIndex:3, fontSize:12 }}>
+            ✏️
+            <input type="file" accept="image/*" onChange={manejarCambioFoto} disabled={subiendoFoto}
+              style={{ display:"none" }} />
+          </label>
         </div>
+        {errorFoto && <div style={{ fontSize:11, color:ROJO }}>{errorFoto}</div>}
         {editingNick ? (
           <div style={{ display:"flex", gap:8, width:"100%" }}>
             <input value={nick} onChange={e=>setNick(e.target.value)} style={{ flex:1, ...inputStyle() }} />
@@ -2424,6 +2497,14 @@ export default function App() {
   const [lockHoras, setLockHorasState] = useState(1);
   const [horaArt, setHoraArt] = useState(horaART());
   const [viendoPerfilDe, setViendoPerfilDe] = useState<string|null>(null);
+  const [fotoPersonalizadaHeader, setFotoPersonalizadaHeader] = useState("");
+
+  useEffect(() => {
+    if (!user) { setFotoPersonalizadaHeader(""); return; }
+    return onSnapshot(doc(db, "usuarios", user.uid), snap => {
+      setFotoPersonalizadaHeader(snap.exists() ? (snap.data().fotoPersonalizada || "") : "");
+    });
+  }, [user]);
 
   useEffect(() => {
     return onSnapshot(doc(db, "config", "app"), snap => {
@@ -2491,8 +2572,8 @@ export default function App() {
             background:BORDO_LIGHT, border:`2px solid ${MARFIL}`, borderRadius:"50%",
             overflow:"hidden", cursor:"pointer",
             display:"flex", alignItems:"center", justifyContent:"center" }}>
-            {user?.photoURL
-              ? <img src={user.photoURL} alt="avatar" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
+            {(fotoPersonalizadaHeader || user?.photoURL)
+              ? <img src={fotoPersonalizadaHeader || user.photoURL} alt="avatar" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
               : <span style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>
                   {user?(user.displayName||"U").slice(0,2).toUpperCase():"?"}
                 </span>
