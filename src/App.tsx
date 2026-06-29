@@ -577,8 +577,9 @@ function TabPartidos({ userId, lockHoras }: { userId: string, lockHoras: number 
 
 function TabTabla({ onSelectUser }: { onSelectUser: (uid: string) => void }) {
   const [jugadores, setJugadores] = useState<any[]>([]);
-  const [desglose, setDesglose] = useState<Record<string, { x3:number, x2:number, x1:number }>>({});
+  const [desglose, setDesglose] = useState<Record<string, { x3:number, x2:number, x1:number, x0:number }>>({});
   const [viewportWidth, setViewportWidth] = useState(typeof window !== "undefined" ? window.innerWidth : 600);
+  const [fechaCorte, setFechaCorte] = useState<string|null>(null);
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2,"0");
   const fecha = `${pad(now.getDate())}/${pad(now.getMonth()+1)}/${now.getFullYear()} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
@@ -595,21 +596,42 @@ function TabTabla({ onSelectUser }: { onSelectUser: (uid: string) => void }) {
     return onSnapshot(q, snap => setJugadores(snap.docs.map(d => ({ id:d.id, ...d.data() }))));
   }, []);
 
+  // El primer partido real del torneo (Mexico vs Sudafrica) marca el corte: cualquier
+  // pronostico de un partido con fecha anterior a esta es de pruebas iniciales y se descarta.
+  // Cargamos TODAS las fechas de partidos de una sola vez (no por-matchId) para minimizar lecturas.
+  const [fechaPorMatch, setFechaPorMatch] = useState<Record<string,string>>({});
+  const [partidosCargados, setPartidosCargados] = useState(false);
+
   useEffect(() => {
+    getDocs(collection(db, "partidos")).then(snap => {
+      const mapa: Record<string,string> = {};
+      snap.docs.forEach(d => { mapa[d.id] = d.data().fecha || ""; });
+      setFechaPorMatch(mapa);
+      setPartidosCargados(true);
+      if (mapa["mgpUr5zbxrVJZHGBEN97"]) setFechaCorte(mapa["mgpUr5zbxrVJZHGBEN97"]);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!partidosCargados) return; // espera a tener el mapa completo antes de calcular el desglose
     const q = query(collection(db, "pronosticos"), where("calculado", "==", true));
     return onSnapshot(q, snap => {
-      const acc: Record<string, { x3:number, x2:number, x1:number }> = {};
+      const acc: Record<string, { x3:number, x2:number, x1:number, x0:number }> = {};
       snap.docs.forEach(d => {
-        const { userId, pts } = d.data();
-        if (!userId || (pts !== 3 && pts !== 2 && pts !== 1)) return;
-        if (!acc[userId]) acc[userId] = { x3:0, x2:0, x1:0 };
+        const { userId, pts, matchId } = d.data();
+        if (!userId || (pts !== 3 && pts !== 2 && pts !== 1 && pts !== 0)) return;
+        // Si el partido fue borrado de la base (simulaciones iniciales eliminadas), descartar igual
+        if (matchId && !(matchId in fechaPorMatch)) return;
+        if (fechaCorte && matchId && fechaPorMatch[matchId] && fechaPorMatch[matchId] < fechaCorte) return; // descarta pruebas iniciales
+        if (!acc[userId]) acc[userId] = { x3:0, x2:0, x1:0, x0:0 };
         if (pts === 3) acc[userId].x3++;
         else if (pts === 2) acc[userId].x2++;
-        else acc[userId].x1++;
+        else if (pts === 1) acc[userId].x1++;
+        else acc[userId].x0++;
       });
       setDesglose(acc);
     });
-  }, []);
+  }, [fechaCorte, fechaPorMatch, partidosCargados]);
 
   const COL_NUM = 38;
   const PADDING = 12;
@@ -678,7 +700,7 @@ function TabTabla({ onSelectUser }: { onSelectUser: (uid: string) => void }) {
                 ))}
               </div>
               {jugadores.map(j => {
-                const d = desglose[j.id] || { x3:0, x2:0, x1:0 };
+                const d = desglose[j.id] || { x3:0, x2:0, x1:0, x0:0 };
                 const mov = j.mov || 0;
                 const movEl = mov > 0
                   ? <span style={{ color:VERDE }}>▲{mov}</span>
@@ -1800,6 +1822,200 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     setGuardandoLock(false);
   }
 
+  const [diagnosticando, setDiagnosticando] = useState(false);
+  const [diagnosticoResultado, setDiagnosticoResultado] = useState<any[]|null>(null);
+  const [partidosAfectadosResumen, setPartidosAfectadosResumen] = useState<any[]>([]);
+
+  const [exportando, setExportando] = useState(false);
+
+  async function exportarCSVCompleto() {
+    setExportando(true);
+    try {
+      const primerPartidoSnap = await getDoc(doc(db, "partidos", "mgpUr5zbxrVJZHGBEN97"));
+      const fechaCorte = primerPartidoSnap.exists() ? (primerPartidoSnap.data().fecha || "") : "";
+
+      const partidosSnap = await getDocs(query(collection(db, "partidos"), orderBy("fecha"), orderBy("hora")));
+      const partidosInfo: Record<string, { gL:number, gV:number, localN:string, visitaN:string, fecha:string, hora:string, esSimulacion:boolean }> = {};
+      partidosSnap.docs.forEach(d => {
+        const p = d.data();
+        if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
+          const esSimulacion = !!(fechaCorte && p.fecha && p.fecha < fechaCorte);
+          partidosInfo[d.id] = { gL:p.gL, gV:p.gV, localN:p.localN||"", visitaN:p.visitaN||"", fecha:p.fecha||"", hora:p.hora||"", esSimulacion };
+        }
+      });
+
+      const pronosSnap = await getDocs(collection(db, "pronosticos"));
+      const porUsuario: Record<string, any[]> = {};
+      pronosSnap.docs.forEach(d => {
+        const data = d.data();
+        if (!porUsuario[data.userId]) porUsuario[data.userId] = [];
+        porUsuario[data.userId].push({ docId: d.id, ...data });
+      });
+
+      const usuariosSnap = await getDocs(collection(db, "usuarios"));
+      const filas: string[] = [];
+      filas.push([
+        "Jugador","Fecha","Local","Visitante","Pronostico","ResultadoReal",
+        "PtsDeberiaValer","PtsGuardado","Calculado","Coincide","EsSimulacion","MatchId"
+      ].join(","));
+
+      usuariosSnap.docs.forEach(d => {
+        const ud = d.data();
+        const nick = (ud.nick || "Sin nick").replace(/,/g, " ");
+        const misPronos = porUsuario[d.id] || [];
+
+        Object.entries(partidosInfo).forEach(([matchId, info]) => {
+          const prono = misPronos.find(p => p.matchId === matchId);
+          const tienePronostico = prono && prono.mL !== null && prono.mL !== undefined && prono.mV !== null && prono.mV !== undefined;
+
+          const ptsCorrectos = tienePronostico ? (calcPtsNuevo(info.gL, info.gV, prono.mL, prono.mV) ?? 0) : 0;
+          const ptsGuardado = tienePronostico ? (prono.pts ?? "null") : "sin pronostico";
+          const calculado = tienePronostico ? String(!!prono.calculado) : "-";
+          // Si es partido de simulacion, no se considera ERROR aunque no coincida (se excluye a proposito del recalculo)
+          const coincide = !tienePronostico ? "-" : info.esSimulacion ? "N/A (simulacion)" : (ptsCorrectos === prono.pts ? "OK" : "ERROR");
+          const miPronostico = tienePronostico ? `${prono.mL}-${prono.mV}` : "-";
+
+          filas.push([
+            nick, info.fecha, info.localN.replace(/,/g," "), info.visitaN.replace(/,/g," "),
+            miPronostico, `${info.gL}-${info.gV}`,
+            tienePronostico ? String(ptsCorrectos) : "-",
+            String(ptsGuardado), calculado, coincide, String(info.esSimulacion), matchId
+          ].join(","));
+        });
+      });
+
+      const csvContent = filas.join("\n");
+      const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `diagnostico_puntos_${new Date().toISOString().slice(0,10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      alert("Error al exportar, probá de nuevo");
+    }
+    setExportando(false);
+  }
+
+  async function diagnosticarPuntos() {
+    setDiagnosticando(true);
+    setDiagnosticoResultado(null);
+    try {
+      // Misma fecha de corte que usa recalcularAciertoHistorico, para no marcar como
+      // "error" los partidos de simulacion/prueba que intencionalmente no se recalculan.
+      const primerPartidoSnap = await getDoc(doc(db, "partidos", "mgpUr5zbxrVJZHGBEN97"));
+      const fechaCorte = primerPartidoSnap.exists() ? (primerPartidoSnap.data().fecha || "") : "";
+
+      // Mapa de resultados reales por matchId (solo partidos posteriores al corte)
+      const partidosSnap = await getDocs(collection(db, "partidos"));
+      const resultadosReales: Record<string, { gL:number, gV:number }> = {};
+      partidosSnap.docs.forEach(d => {
+        const p = d.data();
+        if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
+          if (fechaCorte && p.fecha && p.fecha < fechaCorte) return; // descarta partidos de simulacion previos
+          resultadosReales[d.id] = { gL: p.gL, gV: p.gV };
+        }
+      });
+
+      // Todos los pronosticos, agrupados por usuario
+      const pronosSnap = await getDocs(collection(db, "pronosticos"));
+      const porUsuario: Record<string, any[]> = {};
+      pronosSnap.docs.forEach(d => {
+        const data = d.data();
+        if (!porUsuario[data.userId]) porUsuario[data.userId] = [];
+        porUsuario[data.userId].push({ docId: d.id, ...data });
+      });
+
+      const usuariosSnap = await getDocs(collection(db, "usuarios"));
+      const reporte: any[] = [];
+
+      usuariosSnap.docs.forEach(d => {
+        const ud = d.data();
+        const misPronos = porUsuario[d.id] || [];
+        const inconsistencias: any[] = [];
+
+        misPronos.forEach(prono => {
+          const real = resultadosReales[prono.matchId];
+          if (!real) return; // el partido no tiene resultado todavia, no corresponde comparar
+          if (prono.mL === null || prono.mL === undefined || prono.mV === null || prono.mV === undefined) return; // no pronostico marcador
+
+          const ptsCorrectos = calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0;
+          const ptsGuardadoEnPronostico = prono.pts ?? null;
+
+          // Comparamos lo que DEBERIA valer este pronostico contra lo que tiene guardado
+          if (ptsCorrectos !== ptsGuardadoEnPronostico) {
+            inconsistencias.push({
+              matchId: prono.matchId,
+              miPronostico: `${prono.mL}-${prono.mV}`,
+              resultadoReal: `${real.gL}-${real.gV}`,
+              ptsQueDeberiaTener: ptsCorrectos,
+              ptsQueTieneGuardado: ptsGuardadoEnPronostico,
+              calculado: !!prono.calculado,
+            });
+          }
+        });
+
+        if (inconsistencias.length > 0) {
+          const sumaCorrecta = misPronos.reduce((acc, prono) => {
+            const real = resultadosReales[prono.matchId];
+            if (!real || prono.mL === null || prono.mL === undefined || prono.mV === null || prono.mV === undefined) return acc;
+            return acc + (calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0);
+          }, 0);
+
+          reporte.push({
+            userId: d.id, nick: ud.nick || "Sin nick",
+            ptsGuardado: ud.pts || 0,
+            sumaCorrecta,
+            inconsistencias,
+          });
+        }
+      });
+
+      // Resumen agrupado por matchId: cuantos usuarios distintos afecta cada partido problematico
+      const porPartido: Record<string, { afectados:number, nombres:string[] }> = {};
+      reporte.forEach(r => {
+        r.inconsistencias.forEach((inc:any) => {
+          if (!porPartido[inc.matchId]) porPartido[inc.matchId] = { afectados:0, nombres:[] };
+          porPartido[inc.matchId].afectados++;
+          porPartido[inc.matchId].nombres.push(r.nick);
+        });
+      });
+      setPartidosAfectadosResumen(Object.entries(porPartido).map(([matchId, info]) => ({ matchId, ...info })));
+
+      setDiagnosticoResultado(reporte);
+    } catch (e) {
+      setDiagnosticoResultado([{ error: "Error al diagnosticar, probá de nuevo" }]);
+    }
+    setDiagnosticando(false);
+  }
+
+  const [reparando, setReparando] = useState(false);
+  const [reparandoMsg, setReparandoMsg] = useState("");
+
+  async function repararPartidosDetectados() {
+    if (partidosAfectadosResumen.length === 0) return;
+    setReparando(true);
+    setReparandoMsg("");
+    try {
+      // IMPORTANTE: NO usar calcularPuntosPartido aca (es aditiva, pensada para correr
+      // una sola vez por partido nuevo - si se vuelve a ejecutar sobre un partido ya
+      // procesado, duplica los puntos de TODOS los usuarios, no solo los afectados).
+      // En su lugar, recalculamos todo desde cero con recalcularAciertoHistorico,
+      // que es determinístico e idempotente: da el mismo resultado sin importar
+      // cuantas veces se ejecute.
+      await recalcularAciertoHistorico();
+      setReparandoMsg(`✓ Recalculado desde cero. Volvé a diagnosticar para confirmar.`);
+      setPartidosAfectadosResumen([]);
+      setDiagnosticoResultado(null);
+    } catch (e) {
+      setReparandoMsg("✗ Error al reparar, probá de nuevo");
+    }
+    setReparando(false);
+  }
+
   const [recalculando, setRecalculando] = useState(false);
   const [recalculoMsg, setRecalculoMsg] = useState("");
 
@@ -1807,46 +2023,57 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     setRecalculando(true);
     setRecalculoMsg("");
     try {
+      // Fecha de corte: excluye partidos de prueba/simulacion anteriores al primer partido real
+      const primerPartidoSnap = await getDoc(doc(db, "partidos", "mgpUr5zbxrVJZHGBEN97"));
+      const fechaCorte = primerPartidoSnap.exists() ? (primerPartidoSnap.data().fecha || "") : "";
+
       const partidosSnap = await getDocs(query(collection(db, "partidos"), orderBy("fecha"), orderBy("hora")));
       const partidosOrdenados: { id:string, gL:number, gV:number }[] = [];
       partidosSnap.docs.forEach(d => {
         const p = d.data();
         if (p.gL !== null && p.gL !== undefined && p.gV !== null && p.gV !== undefined) {
+          if (fechaCorte && p.fecha && p.fecha < fechaCorte) return; // descarta partidos de simulacion previos
           partidosOrdenados.push({ id: d.id, gL: p.gL, gV: p.gV });
         }
       });
       const totalPartidosConResultado = partidosOrdenados.length;
 
       const pronosSnap = await getDocs(collection(db, "pronosticos"));
-      const pronosPorUsuario: Record<string, Record<string, {mL:number, mV:number}>> = {};
+      const pronosPorUsuario: Record<string, Record<string, {mL:number, mV:number, docRef:any}>> = {};
       pronosSnap.docs.forEach(d => {
         const { userId, matchId, mL, mV } = d.data();
         if (mL === null || mV === null || mL === undefined || mV === undefined) return;
         if (!pronosPorUsuario[userId]) pronosPorUsuario[userId] = {};
-        pronosPorUsuario[userId][matchId] = { mL, mV };
+        pronosPorUsuario[userId][matchId] = { mL, mV, docRef: d.ref };
       });
 
       const usuariosSnap = await getDocs(collection(db, "usuarios"));
+      const escriturasPronosticos: Promise<any>[] = [];
+
       await Promise.all(usuariosSnap.docs.map(d => {
         const misPronos = pronosPorUsuario[d.id] || {};
         let golesAcertados = 0, golesPronosticados = 0, exactos = 0, aciertosResultado = 0;
-        let rachaActual = 0, rachaMasLarga = 0, ceroRacha = 0;
+        let rachaActual = 0, rachaMasLarga = 0, ceroRacha = 0, pts = 0;
 
-        // Recorre en orden cronologico para que las rachas (consecutivos) sean correctas
+        // Recorre en orden cronologico para que las rachas (consecutivos) y pts sean correctos
         partidosOrdenados.forEach(real => {
           const prono = misPronos[real.id];
           const tienePronostico = !!prono;
-          const pts = tienePronostico ? (calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0) : 0;
+          const ptsPartido = tienePronostico ? (calcPtsNuevo(real.gL, real.gV, prono.mL, prono.mV) ?? 0) : 0;
+          pts += ptsPartido;
 
           if (tienePronostico) {
             golesPronosticados += 2;
             if (prono.mL === real.gL) golesAcertados++;
             if (prono.mV === real.gV) golesAcertados++;
-            if (pts >= 1) aciertosResultado++;
+            if (ptsPartido >= 1) aciertosResultado++;
+            // Sincroniza el pts guardado en el documento del pronostico individual,
+            // que es justo lo que el diagnostico (y el desglose x3/x2/x1) compara/cuenta.
+            escriturasPronosticos.push(setDoc(prono.docRef, { pts: ptsPartido, calculado: true }, { merge:true }));
           }
-          if (pts === 3) { exactos++; rachaActual++; } else { rachaActual = 0; }
+          if (ptsPartido === 3) { exactos++; rachaActual++; } else { rachaActual = 0; }
           rachaMasLarga = Math.max(rachaMasLarga, rachaActual);
-          ceroRacha = pts === 0 ? ceroRacha + 1 : 0;
+          ceroRacha = ptsPartido === 0 ? ceroRacha + 1 : 0;
         });
 
         const acierto = golesPronosticados > 0 ? Math.round((golesAcertados/golesPronosticados)*100) : 0;
@@ -1854,12 +2081,15 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
         const pctAciertoResultado = totalPartidosConResultado > 0 ? Math.round((aciertosResultado/totalPartidosConResultado)*100) : 0;
 
         return setDoc(d.ref, {
-          golesAcertados, golesPronosticados, acierto,
+          pts, golesAcertados, golesPronosticados, acierto,
           partidosConResultado: totalPartidosConResultado,
           aciertosResultado, pctExactos, pctAciertoResultado,
           rachaActual, rachaMasLarga, ceroRacha,
         }, { merge:true });
       }));
+
+      // Espera a que todos los pronosticos individuales queden sincronizados con su pts real
+      await Promise.all(escriturasPronosticos);
 
       setRecalculoMsg(`✓ Recalculado para ${usuariosSnap.docs.length} jugadores`);
     } catch (e) {
@@ -1886,6 +2116,11 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
   }
 
   async function eliminar(id: string) {
+    // Borrado en cascada: si el partido se elimina, sus pronosticos asociados quedarian
+    // huerfanos (con pts ya calculado pero apuntando a un matchId que no existe mas),
+    // contaminando el desglose x3/x2/x1 a futuro. Los borramos junto con el partido.
+    const pronosSnap = await getDocs(query(collection(db, "pronosticos"), where("matchId", "==", id)));
+    await Promise.all(pronosSnap.docs.map(d => deleteDoc(d.ref)));
     await deleteDoc(doc(db,"partidos",id));
     setConfirmDelete(null); setMsg("Partido eliminado");
     setTimeout(()=>setMsg(""),3000);
@@ -1894,8 +2129,10 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
   async function borrarTodo() {
     setLoading(true);
     const snap = await getDocs(collection(db,"partidos"));
+    const pronosSnap = await getDocs(collection(db, "pronosticos"));
+    await Promise.all(pronosSnap.docs.map(d => deleteDoc(d.ref))); // borra todos los pronosticos primero
     for (const d of snap.docs) await deleteDoc(doc(db,"partidos",d.id));
-    setConfirmBorrarTodo(false); setMsg("✓ Todos los partidos eliminados.");
+    setConfirmBorrarTodo(false); setMsg("✓ Todos los partidos y sus pronósticos eliminados.");
     setLoading(false); setTimeout(()=>setMsg(""),3000);
   }
 
@@ -1934,7 +2171,7 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
     const blob = new Blob(["\uFEFF" + rows.join("\n")], { type:"text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = "prode_resultados.csv";
+    a.href = url; a.download = "ecfc_prode_resultados.csv";
     a.click(); URL.revokeObjectURL(url);
     setMsg("✓ CSV descargado");
     setTimeout(() => setMsg(""), 3000);
@@ -2069,12 +2306,102 @@ function AdminPanel({ onBack }: { onBack:()=>void }) {
           </div>
 
           <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", marginBottom:10 }}>
+            <div style={{ background:BORDO_DARK, padding:"8px 12px" }}><span style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>🔍 Diagnóstico (solo lectura)</span></div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 14px" }}>
+              <span style={{ fontSize:16 }}>🩺</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:500 }}>Detectar puntos desincronizados</div>
+                <div style={{ fontSize:10, color:"#888" }}>Compara la suma real de pronósticos vs el total guardado</div>
+              </div>
+              <button onClick={diagnosticarPuntos} disabled={diagnosticando}
+                style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:5,
+                  padding:"6px 10px", fontSize:11, fontWeight:600, cursor:"pointer",
+                  opacity:diagnosticando?0.6:1, whiteSpace:"nowrap" }}>
+                {diagnosticando ? "Revisando..." : "Diagnosticar"}
+              </button>
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:10, padding:"0 14px 11px" }}>
+              <span style={{ fontSize:16 }}>📄</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:500 }}>Exportar CSV completo</div>
+                <div style={{ fontSize:10, color:"#888" }}>Todos los pronósticos vs resultados, jugador por jugador</div>
+              </div>
+              <button onClick={exportarCSVCompleto} disabled={exportando}
+                style={{ background:BORDO_DARK, color:MARFIL, border:"none", borderRadius:5,
+                  padding:"6px 10px", fontSize:11, fontWeight:600, cursor:"pointer",
+                  opacity:exportando?0.6:1, whiteSpace:"nowrap" }}>
+                {exportando ? "Generando..." : "Descargar CSV"}
+              </button>
+            </div>
+            {partidosAfectadosResumen.length > 0 && (
+              <div style={{ padding:"0 14px 10px" }}>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:6 }}>
+                  <div style={{ fontSize:11, fontWeight:600, color:BORDO }}>
+                    📋 Resumen: {partidosAfectadosResumen.length} partido{partidosAfectadosResumen.length>1?"s":""} con problemas
+                  </div>
+                  <button onClick={repararPartidosDetectados} disabled={reparando}
+                    style={{ background:VERDE, color:MARFIL, border:"none", borderRadius:5,
+                      padding:"5px 9px", fontSize:10, fontWeight:600, cursor:"pointer",
+                      opacity:reparando?0.6:1, whiteSpace:"nowrap" }}>
+                    {reparando ? "Reparando..." : "🔧 Reparar"}
+                  </button>
+                </div>
+                {partidosAfectadosResumen.map((p:any, i:number) => (
+                  <div key={i} style={{ fontSize:10, color:"#555", marginBottom:4, padding:6,
+                    background:"#fff", borderRadius:6, border:"0.5px solid #e0ddd5" }}>
+                    <b>{p.matchId}</b> → afecta a {p.afectados} jugador{p.afectados>1?"es":""}: {p.nombres.join(", ")}
+                  </div>
+                ))}
+                {reparandoMsg && (
+                  <div style={{ fontSize:10, color:reparandoMsg.startsWith("✓")?VERDE:ROJO, marginTop:4 }}>{reparandoMsg}</div>
+                )}
+              </div>
+            )}
+            {diagnosticoResultado && diagnosticoResultado.length === 0 && (
+              <div style={{ padding:"0 14px 12px", fontSize:11, color:VERDE }}>✓ Todo coincide, no se encontraron desincronizaciones</div>
+            )}
+            {diagnosticoResultado && diagnosticoResultado.length > 0 && (
+              <div style={{ padding:"0 14px 12px" }}>
+                {diagnosticoResultado.map((r:any, i:number) => (
+                  <div key={i} style={{ background:MARFIL_LIGHT, borderRadius:8, padding:10, marginBottom:8,
+                    border:"0.5px solid #e0ddd5" }}>
+                    {r.error
+                      ? <div style={{ fontSize:11, color:ROJO }}>{r.error}</div>
+                      : (
+                        <>
+                          <div style={{ fontSize:12, fontWeight:600, color:BORDO }}>{r.nick}</div>
+                          <div style={{ fontSize:11, color:"#555", marginTop:2 }}>
+                            Guardado: <b>{r.ptsGuardado}</b> · Debería tener: <b style={{color:VERDE}}>{r.sumaCorrecta}</b>
+                          </div>
+                          <div style={{ fontSize:10, fontWeight:600, color:ROJO, marginTop:6 }}>
+                            Partidos con inconsistencia ({r.inconsistencias.length}):
+                          </div>
+                          {r.inconsistencias.map((inc:any, j:number) => (
+                            <div key={j} style={{ fontSize:10, color:"#555", marginTop:4, paddingLeft:6,
+                              borderLeft:`2px solid ${ROJO}` }}>
+                              matchId: {inc.matchId}<br/>
+                              Pronosticó <b>{inc.miPronostico}</b> · Resultado real <b>{inc.resultadoReal}</b><br/>
+                              Debería valer <b style={{color:VERDE}}>{inc.ptsQueDeberiaTener}pt</b> ·
+                              Tiene guardado <b style={{color:ROJO}}>{String(inc.ptsQueTieneGuardado)}pt</b> ·
+                              calculado: {String(inc.calculado)}
+                            </div>
+                          ))}
+                        </>
+                      )
+                    }
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ background:"white", borderRadius:12, border:"0.5px solid #e0ddd5", overflow:"hidden", marginBottom:10 }}>
             <div style={{ background:BORDO_DARK, padding:"8px 12px" }}><span style={{ color:MARFIL, fontSize:12, fontWeight:600 }}>🎯 Estadísticas</span></div>
             <div style={{ display:"flex", alignItems:"center", gap:10, padding:"11px 14px" }}>
               <span style={{ fontSize:16 }}>📊</span>
               <div style={{ flex:1 }}>
                 <div style={{ fontSize:12, fontWeight:500 }}>Estadísticas de acierto</div>
-                <div style={{ fontSize:10, color:"#888" }}>Recalcula % goles, % exactos y % acierto con todo lo jugado</div>
+                <div style={{ fontSize:10, color:"#888" }}>Recalcula puntos, % goles, % exactos y % acierto desde cero, excluyendo partidos de prueba</div>
               </div>
               <button onClick={recalcularAciertoHistorico} disabled={recalculando}
                 style={{ background:BORDO, color:MARFIL, border:"none", borderRadius:5,
